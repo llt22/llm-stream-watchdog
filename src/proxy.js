@@ -168,11 +168,31 @@ function firstByteTimeoutForRequest(config, body, headers) {
     : config.nonStreamingFirstByteTimeoutMs;
 }
 
+function createSseCompletionDetector(enabled) {
+  if (!enabled) return { push() {}, complete: true };
+  const decoder = new TextDecoder();
+  let carry = '';
+  let complete = false;
+  return {
+    push(chunk, final = false) {
+      if (complete) return;
+      const text = carry + decoder.decode(chunk, { stream: !final });
+      if (/(?:^|\r?\n)data:\s*\[DONE\](?:\r?\n|$)/.test(text)
+        || /(?:^|\r?\n)event:\s*response\.completed(?:\r?\n|$)/.test(text)
+        || /["']type["']\s*:\s*["']response\.completed["']/.test(text)) {
+        complete = true;
+      }
+      carry = text.slice(-256);
+    },
+    get complete() { return complete; },
+  };
+}
 
 function errorReason(error, downstreamSignal) {
   if (downstreamSignal.aborted) return 'downstream_cancelled';
   if (error?.message === 'first byte timeout') return 'first byte timeout';
   if (error?.message === 'stream idle timeout') return 'stream idle timeout';
+  if (error?.message === 'stream ended before completion') return 'stream ended before completion';
   if (error?.message === 'downstream closed') return 'downstream closed';
   return 'upstream_transport_error';
 }
@@ -233,6 +253,7 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
     const url = targetUrl(config.upstreamBaseUrl, request.url);
     const headers = copyRequestHeaders(request.headers);
     headers.set('x-client-request-id', String(requestId));
+    const streamingRequest = isStreamingRequest(body, headers);
     const firstByteTimeoutMs = firstByteTimeoutForRequest(config, body, headers);
     let lastError;
 
@@ -262,6 +283,9 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
         response.statusMessage = result.response.statusText;
         copyResponseHeaders(result.response.headers, response);
         responseCommitted = true;
+        const completionDetector = createSseCompletionDetector(
+          streamingRequest && result.response.headers.get('content-type')?.toLowerCase().includes('text/event-stream'),
+        );
         response.flushHeaders();
         log(logger, 'info', 'upstream_first_byte', {
           requestId,
@@ -271,19 +295,25 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
         });
 
         if (!result.reader || !result.first || result.first.done) {
+          completionDetector.push(undefined, true);
+          if (!completionDetector.complete) throw new Error('stream ended before completion');
           response.end();
           log(logger, 'info', 'request_complete', { requestId, attempt, durationMs: Date.now() - startedAt });
           return;
         }
 
+        completionDetector.push(result.first.value);
         if (!response.write(Buffer.from(result.first.value))) await waitForDrain(response);
         while (true) {
           const chunk = await readWithIdleTimeout(result.reader, config.idleTimeoutMs);
           if (chunk.done) {
+            completionDetector.push(undefined, true);
+            if (!completionDetector.complete) throw new Error('stream ended before completion');
             response.end();
             log(logger, 'info', 'request_complete', { requestId, attempt, durationMs: Date.now() - startedAt });
             return;
           }
+          completionDetector.push(chunk.value);
           if (!response.write(Buffer.from(chunk.value))) await waitForDrain(response);
         }
       } catch (error) {

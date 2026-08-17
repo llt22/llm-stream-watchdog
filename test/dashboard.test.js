@@ -49,6 +49,9 @@ test('serves the local dashboard and anonymous summary API', async (t) => {
   assert.match(html, /class="overview"/);
   assert.match(html, /上游稳定性/);
   assert.match(html, /上游异常/);
+  assert.match(html, /需客户端重发/);
+  assert.match(html, /const settled=t\.settled/);
+  assert.match(html, /需重发/);
   assert.match(html, /客户端主动取消不属于异常/);
   assert.match(html, /服务地址/);
   assert.match(html, /location\.origin\+'\/v1'/);

@@ -157,6 +157,36 @@ test('terminates a partial stream that becomes idle without replaying it', async
   assert.ok(logs.some((entry) => entry.event === 'upstream_stream_stalled'));
 });
 
+test('classifies SSE EOF without a completion marker as an interruption', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    response.setHeader('content-type', 'text/event-stream');
+    response.write('data: {"type":"response.output_text.delta","delta":"partial"}\n\n');
+    response.end();
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  await new Promise((resolve) => {
+    const request = http.request({
+      host: '127.0.0.1', port: proxyPort, path: '/v1/responses', method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    }, (response) => {
+      response.resume();
+      response.on('aborted', resolve);
+      response.on('end', resolve);
+      response.on('error', resolve);
+    });
+    request.on('error', resolve);
+    request.end(JSON.stringify({ model: 'test', stream: true, input: 'hello' }));
+  });
+
+  assert.ok(logs.some((entry) => entry.event === 'stream_error_after_commit' && entry.reason === 'stream ended before completion'));
+  assert.ok(!logs.some((entry) => entry.event === 'request_complete'));
+});
+
 test('uses only client-supplied authentication and ignores retired key config', async (t) => {
   const retiredSecret = 'retired-watchdog-secret';
   const upstream = http.createServer((request, response) => {

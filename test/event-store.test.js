@@ -60,6 +60,46 @@ test('counts client cancellation without classifying it as an anomaly', (t) => {
   assert.equal(summary.daily[0].anomalies, 0);
 });
 
+test('excludes active requests but counts stream interruptions as failed outcomes', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watchdog-store-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = createEventStore({ filePath: path.join(directory, 'events.jsonl'), retentionDays: 30 });
+  const firstId = 'a4e5f230-2f2d-4c4d-8a31-c6d561961552';
+  const activeId = 'b4e5f230-2f2d-4c4d-8a31-c6d561961552';
+
+  store.record(event('upstream_attempt_started', { requestId: firstId, attempt: 1 }));
+  store.record(event('request_complete', { requestId: firstId, attempt: 1, durationMs: 100 }));
+  store.record(event('upstream_attempt_started', { requestId: activeId, attempt: 1, method: 'POST', path: '/v1/chat/completions' }));
+
+  const activeSummary = store.summary(30);
+  assert.equal(activeSummary.totals.requests, 2);
+  assert.equal(activeSummary.totals.completed, 1);
+  assert.equal(activeSummary.totals.active, 1);
+  assert.equal(activeSummary.totals.settled, 1);
+  assert.equal(activeSummary.totals.failedRequests, 0);
+
+  store.record(event('upstream_stream_stalled', { requestId: activeId, attempt: 1, reason: 'stream idle timeout' }));
+  const failedSummary = store.summary(30);
+  assert.equal(failedSummary.totals.active, 0);
+  assert.equal(failedSummary.totals.settled, 2);
+  assert.equal(failedSummary.totals.failedRequests, 1);
+  assert.equal(failedSummary.recentAnomalies[0].path, '/v1/chat/completions');
+});
+
+test('does not restore orphaned in-progress requests after a process restart', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watchdog-store-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'events.jsonl');
+  const store = createEventStore({ filePath, retentionDays: 30 });
+  store.record(event('upstream_attempt_started', { attempt: 1, method: 'POST', path: '/v1/responses' }));
+  assert.equal(store.summary(30).totals.active, 1);
+
+  const restored = createEventStore({ filePath, retentionDays: 30 });
+  assert.equal(restored.summary(30).totals.active, 0);
+  assert.equal(restored.summary(30).totals.requests, 0);
+  assert.equal(restored.summary(30).daily[0].requests, 0);
+});
+
 test('drops expired and malformed history during startup compaction', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watchdog-store-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
