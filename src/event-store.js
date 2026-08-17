@@ -21,7 +21,6 @@ const ANOMALY_EVENTS = new Set([
   'upstream_failed',
   'upstream_stream_stalled',
   'stream_error_after_commit',
-  'downstream_cancelled',
 ]);
 
 function sanitizePath(value) {

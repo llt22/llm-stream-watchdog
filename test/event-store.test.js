@@ -47,6 +47,19 @@ test('persists only whitelisted anonymous event fields and restores history', (t
   assert.equal(summary.recentAnomalies[0].event, 'upstream_retry');
 });
 
+test('counts client cancellation without classifying it as an anomaly', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watchdog-store-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = createEventStore({ filePath: path.join(directory, 'events.jsonl'), retentionDays: 30 });
+  store.record(event('upstream_attempt_started', { attempt: 1, path: '/v1/chat/completions' }));
+  store.record(event('downstream_cancelled', { attempt: 1, durationMs: 250 }));
+
+  const summary = store.summary(30);
+  assert.equal(summary.totals.cancelled, 1);
+  assert.equal(summary.recentAnomalies.length, 0);
+  assert.equal(summary.daily[0].anomalies, 0);
+});
+
 test('drops expired and malformed history during startup compaction', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watchdog-store-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
