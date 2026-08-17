@@ -21,7 +21,6 @@ function config(upstreamPort, overrides = {}) {
     host: '127.0.0.1',
     port: 0,
     upstreamBaseUrl: new URL('http://127.0.0.1:' + upstreamPort + '/v1'),
-    upstreamApiKey: '',
     firstByteTimeoutMs: 80,
     nonStreamingFirstByteTimeoutMs: 80,
     idleTimeoutMs: 80,
@@ -158,23 +157,30 @@ test('terminates a partial stream that becomes idle without replaying it', async
   assert.ok(logs.some((entry) => entry.event === 'upstream_stream_stalled'));
 });
 
-test('injects a configured upstream key without logging it', async (t) => {
-  const secret = 'test-secret-never-log';
+test('uses only client-supplied authentication and ignores retired key config', async (t) => {
+  const retiredSecret = 'retired-watchdog-secret';
   const upstream = http.createServer((request, response) => {
-    assert.equal(request.headers.authorization, 'Bearer ' + secret);
+    assert.equal(request.headers.authorization, 'Bearer client-selected-key');
+    assert.equal(request.headers['x-api-key'], 'client-selected-secondary-header');
     response.end('ok');
   });
   const upstreamPort = await listen(upstream);
   const logs = [];
-  const proxy = createProxyServer(config(upstreamPort, { upstreamApiKey: secret }), {
+  const proxy = createProxyServer(config(upstreamPort, { upstreamApiKey: retiredSecret }), {
     logger: (line) => logs.push(line),
   });
   const proxyPort = await listen(proxy);
   t.after(async () => { await close(proxy); await close(upstream); });
 
-  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models', {
+    headers: {
+      authorization: 'Bearer client-selected-key',
+      'x-api-key': 'client-selected-secondary-header',
+    },
+  });
   assert.equal(await response.text(), 'ok');
-  assert.ok(logs.every((line) => !line.includes(secret)));
+  assert.ok(logs.every((line) => !line.includes(retiredSecret) && !line.includes('client-selected-key')));
+  assert.equal(loadConfig({ UPSTREAM_BASE_URL: 'https://provider.example/v1', UPSTREAM_API_KEY: retiredSecret }).upstreamApiKey, undefined);
 });
 
 

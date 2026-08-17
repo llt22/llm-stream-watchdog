@@ -23,12 +23,11 @@ zsh -lc 'node --version'
 
 ## Start
 
-Do not put the API key in a committed file. Export it in the shell that starts the proxy:
+Configure the upstream URL in the shell that starts the proxy. API keys remain owned by the client and are sent with each request:
 
 ```sh
 cd llm-stream-watchdog
 export UPSTREAM_BASE_URL='https://your-provider.example/v1'
-export UPSTREAM_API_KEY='replace-with-your-key'
 npm start
 ```
 
@@ -38,14 +37,13 @@ The local base URL is:
 http://127.0.0.1:8787/v1
 ```
 
-Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base URL. The proxy injects `UPSTREAM_API_KEY` into upstream requests when configured; otherwise it forwards the client's Authorization header.
+Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base URL. The client must send its authentication headers with each request; the proxy forwards them unchanged and never owns or injects API keys.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `UPSTREAM_BASE_URL` | required | Target OpenAI-compatible API |
-| `UPSTREAM_API_KEY` | empty | Optional upstream bearer token |
 | `HOST` | `127.0.0.1` | Local bind host |
 | `PORT` | `8787` | Local bind port |
 | `FIRST_BYTE_TIMEOUT_MS` | `45000` | Maximum first-body-byte wait for JSON requests with `stream: true` |
@@ -80,7 +78,7 @@ docker compose ps
 curl http://127.0.0.1:8787/health
 ```
 
-The API key does not need to be stored in Compose when clients already send their Authorization header, as DSH and OMP do. To stop the service intentionally:
+API keys are not accepted through Compose; clients such as DSH and OMP send their selected credentials with each request. To stop the service intentionally:
 
 ```sh
 docker compose down

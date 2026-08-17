@@ -41,7 +41,6 @@ export function loadConfig(env = process.env) {
     host: env.HOST || '127.0.0.1',
     port: positiveInteger(env.PORT, 8787, 'PORT'),
     upstreamBaseUrl,
-    upstreamApiKey: env.UPSTREAM_API_KEY || '',
     firstByteTimeoutMs: positiveInteger(env.FIRST_BYTE_TIMEOUT_MS, 45000, 'FIRST_BYTE_TIMEOUT_MS'),
     nonStreamingFirstByteTimeoutMs: positiveInteger(env.NON_STREAMING_FIRST_BYTE_TIMEOUT_MS, 120000, 'NON_STREAMING_FIRST_BYTE_TIMEOUT_MS'),
     idleTimeoutMs: positiveInteger(env.IDLE_TIMEOUT_MS, 180000, 'IDLE_TIMEOUT_MS'),
@@ -56,13 +55,12 @@ function log(logger, level, event, fields = {}) {
   logger(JSON.stringify({ time: new Date().toISOString(), level, event, ...fields }));
 }
 
-function copyRequestHeaders(headers, upstreamApiKey) {
+function copyRequestHeaders(headers) {
   const output = new Headers();
   for (const [name, value] of Object.entries(headers)) {
     if (value === undefined || HOP_BY_HOP_HEADERS.has(name.toLowerCase())) continue;
     output.set(name, Array.isArray(value) ? value.join(', ') : value);
   }
-  if (upstreamApiKey) output.set('authorization', 'Bearer ' + upstreamApiKey);
   return output;
 }
 
@@ -233,7 +231,7 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
     }
 
     const url = targetUrl(config.upstreamBaseUrl, request.url);
-    const headers = copyRequestHeaders(request.headers, config.upstreamApiKey);
+    const headers = copyRequestHeaders(request.headers);
     headers.set('x-client-request-id', String(requestId));
     const firstByteTimeoutMs = firstByteTimeoutForRequest(config, body, headers);
     let lastError;
