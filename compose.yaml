@@ -1,0 +1,48 @@
+services:
+  watchdog:
+    build:
+      context: .
+    image: llm-stream-watchdog:local
+    container_name: llm-stream-watchdog
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:?Set UPSTREAM_BASE_URL in .env}
+      FIRST_BYTE_TIMEOUT_MS: 45000
+      NON_STREAMING_FIRST_BYTE_TIMEOUT_MS: 120000
+      IDLE_TIMEOUT_MS: 180000
+      MAX_ATTEMPTS: 2
+      MAX_REQUEST_BODY_BYTES: 67108864
+      EVENT_RETENTION_DAYS: ${EVENT_RETENTION_DAYS:-30}
+      EVENT_STORE_PATH: /data/events.jsonl
+    volumes:
+      - watchdog-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  watchdog-data:

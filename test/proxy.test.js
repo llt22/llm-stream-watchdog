@@ -1,0 +1,373 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import test from 'node:test';
+import { once } from 'node:events';
+import { createProxyServer, loadConfig } from '../src/proxy.js';
+
+async function listen(server) {
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return server.address().port;
+}
+
+async function close(server) {
+  if (!server.listening) return;
+  server.close();
+  await once(server, 'close');
+}
+
+function config(upstreamPort, overrides = {}) {
+  return {
+    host: '127.0.0.1',
+    port: 0,
+    upstreamBaseUrl: new URL('http://127.0.0.1:' + upstreamPort + '/v1'),
+    upstreamApiKey: '',
+    firstByteTimeoutMs: 80,
+    nonStreamingFirstByteTimeoutMs: 80,
+    idleTimeoutMs: 80,
+    maxAttempts: 2,
+    maxRequestBodyBytes: 64 * 1024 * 1024,
+    ...overrides,
+  };
+}
+
+test('requires an explicit upstream and uses protocol-aware timeout defaults', () => {
+  assert.throws(() => loadConfig({}), /UPSTREAM_BASE_URL is required/);
+  const loaded = loadConfig({ UPSTREAM_BASE_URL: 'https://provider.example/v1' });
+  assert.equal(loaded.firstByteTimeoutMs, 45000);
+  assert.equal(loaded.nonStreamingFirstByteTimeoutMs, 120000);
+  assert.equal(loaded.maxRequestBodyBytes, 64 * 1024 * 1024);
+  assert.equal(loaded.eventRetentionDays, 30);
+  assert.equal(loadConfig({ UPSTREAM_BASE_URL: 'https://provider.example/v1', EVENT_RETENTION_DAYS: '365' }).eventRetentionDays, 30);
+});
+
+test('forwards models requests and preserves the v1 path', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    assert.equal(request.url, '/v1/models?available=true');
+    assert.equal(request.headers.authorization, 'Bearer client-key');
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models?available=true', {
+    headers: { authorization: 'Bearer client-key' },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { data: [{ id: 'test-model' }] });
+});
+
+test('forwards chat completions while replacing client-controlled request IDs', async (t) => {
+  let upstreamRequestId;
+  const upstream = http.createServer(async (request, response) => {
+    assert.equal(request.method, 'POST');
+    upstreamRequestId = request.headers['x-client-request-id'];
+    assert.equal(request.url, '/v1/chat/completions');
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString('utf8')), {
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'hi' } }] }));
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-request-id': 'secret-client-controlled-value' },
+    body: JSON.stringify({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'hello' }],
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    choices: [{ message: { role: 'assistant', content: 'hi' } }],
+  });
+  assert.match(upstreamRequestId, /^[0-9a-f-]{36}$/);
+  assert.notEqual(upstreamRequestId, 'secret-client-controlled-value');
+  assert.ok(logs.every((entry) => entry.requestId !== 'secret-client-controlled-value'));
+});
+
+test('retries when the first attempt produces no response body bytes', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer((request, response) => {
+    attempts += 1;
+    response.setHeader('content-type', 'text/event-stream');
+    response.flushHeaders();
+    if (attempts === 1) return;
+    response.end('data: {"type":"response.completed"}\n\ndata: [DONE]\n\n');
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/responses', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'test', stream: true, input: 'hello' }),
+  });
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /response.completed/);
+  assert.equal(attempts, 2);
+  assert.ok(logs.some((entry) => entry.event === 'upstream_retry'));
+});
+
+test('terminates a partial stream that becomes idle without replaying it', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer((request, response) => {
+    attempts += 1;
+    response.setHeader('content-type', 'text/event-stream');
+    response.flushHeaders();
+    response.write('data: {"type":"response.output_text.delta","delta":"hello"}\n\n');
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const result = await new Promise((resolve, reject) => {
+    const request = http.get('http://127.0.0.1:' + proxyPort + '/v1/responses', (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('aborted', () => resolve({ body, aborted: true }));
+      response.on('end', () => resolve({ body, aborted: false }));
+      response.on('error', (error) => {
+        if (error.code === 'ECONNRESET') resolve({ body, aborted: true });
+        else reject(error);
+      });
+    });
+    request.on('error', reject);
+  });
+
+  assert.match(result.body, /hello/);
+  assert.equal(result.aborted, true);
+  assert.equal(attempts, 1);
+  assert.ok(logs.some((entry) => entry.event === 'upstream_stream_stalled'));
+});
+
+test('injects a configured upstream key without logging it', async (t) => {
+  const secret = 'test-secret-never-log';
+  const upstream = http.createServer((request, response) => {
+    assert.equal(request.headers.authorization, 'Bearer ' + secret);
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort, { upstreamApiKey: secret }), {
+    logger: (line) => logs.push(line),
+  });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(await response.text(), 'ok');
+  assert.ok(logs.every((line) => !line.includes(secret)));
+});
+
+
+test('times out and retries before upstream sends response headers', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer((request, response) => {
+    attempts += 1;
+    if (attempts === 1) return;
+    response.end('recovered');
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(await response.text(), 'recovered');
+  assert.equal(attempts, 2);
+  assert.ok(logs.some((entry) => entry.event === 'upstream_retry' && entry.reason === 'first byte timeout'));
+});
+
+test('retries retryable status without exposing the first response', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer((request, response) => {
+    attempts += 1;
+    if (attempts === 1) {
+      response.statusCode = 503;
+      return response.end('temporary failure');
+    }
+    response.end('recovered');
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'recovered');
+  assert.equal(attempts, 2);
+  assert.ok(logs.some((entry) => entry.event === 'upstream_retry' && entry.reason === 'status_503'));
+});
+
+test('cancelling the downstream response aborts upstream promptly', async (t) => {
+  let upstreamClosedResolve;
+  const upstreamClosed = new Promise((resolve) => { upstreamClosedResolve = resolve; });
+  const upstream = http.createServer((request, response) => {
+    response.setHeader('content-type', 'text/event-stream');
+    response.flushHeaders();
+    response.write('data: hello\n\n');
+    response.once('close', upstreamClosedResolve);
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort, { idleTimeoutMs: 5000 }), {
+    logger: (line) => logs.push(JSON.parse(line)),
+  });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  await new Promise((resolve, reject) => {
+    const request = http.get('http://127.0.0.1:' + proxyPort + '/v1/responses', (response) => {
+      response.once('data', () => {
+        response.destroy();
+        resolve();
+      });
+    });
+    request.on('error', reject);
+  });
+
+  await Promise.race([
+    upstreamClosed,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('upstream was not cancelled promptly')), 500)),
+  ]);
+  assert.ok(logs.some((entry) => entry.event === 'downstream_cancelled'));
+});
+
+test('does not retry a transport failure after response bytes are committed', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer((request, response) => {
+    attempts += 1;
+    response.setHeader('content-type', 'text/event-stream');
+    response.flushHeaders();
+    response.write('data: partial\n\n');
+    setTimeout(() => response.socket.destroy(new Error('upstream reset')), 20);
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  await new Promise((resolve) => {
+    const request = http.get('http://127.0.0.1:' + proxyPort + '/v1/responses', (response) => {
+      response.resume();
+      response.on('aborted', resolve);
+      response.on('end', resolve);
+      response.on('error', resolve);
+    });
+    request.on('error', resolve);
+  });
+
+  assert.equal(attempts, 1);
+  assert.ok(logs.some((entry) => entry.event === 'stream_error_after_commit'));
+  assert.ok(!logs.some((entry) => entry.event === 'upstream_retry'));
+});
+
+test('maps the exact local API root to the exact upstream API root', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    assert.equal(request.url, '/v1?probe=true');
+    response.end('root');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1?probe=true');
+  assert.equal(await response.text(), 'root');
+});
+
+test('rejects request bodies over the configured limit', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer(() => { attempts += 1; });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, { maxRequestBodyBytes: 8 }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/responses', {
+    method: 'POST',
+    body: '0123456789',
+  });
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error, 'request_body_too_large');
+  assert.equal(attempts, 0);
+});
+
+test('preserves multiple set-cookie response headers', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    response.setHeader('set-cookie', ['a=1; Path=/', 'b=2; Path=/']);
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.deepEqual(response.headers.getSetCookie(), ['a=1; Path=/', 'b=2; Path=/']);
+});
+
+test('forwards non-stream Responses API JSON', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    assert.equal(request.url, '/v1/responses');
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ id: 'resp_test', status: 'completed' }));
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/responses', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'test', input: 'hello' }),
+  });
+  assert.deepEqual(await response.json(), { id: 'resp_test', status: 'completed' });
+});
+
+
+test('allows healthy non-streaming responses beyond the streaming timeout', async (t) => {
+  let attempts = 0;
+  const upstream = http.createServer((request, response) => {
+    attempts += 1;
+    setTimeout(() => response.end(JSON.stringify({ status: 'completed' })), 70);
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    firstByteTimeoutMs: 25,
+    nonStreamingFirstByteTimeoutMs: 150,
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/responses', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'test', input: 'long reasoning', stream: false }),
+  });
+  assert.deepEqual(await response.json(), { status: 'completed' });
+  assert.equal(attempts, 1);
+});

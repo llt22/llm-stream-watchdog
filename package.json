@@ -1,0 +1,14 @@
+{
+  "name": "llm-stream-watchdog",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local OpenAI-compatible proxy that detects and recovers stalled upstream streams.",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/*.js && node --check test/*.js",
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

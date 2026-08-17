@@ -1,0 +1,107 @@
+# LLM Stream Watchdog
+
+A small local OpenAI-compatible proxy that detects stalled upstream model responses. It is designed for clients such as Codex, OMP, and DSH that can use a custom OpenAI-compatible base URL.
+
+## What it does
+
+- Proxies `/v1/responses`, `/v1/chat/completions`, `/v1/models`, and other paths transparently.
+- Retries connection failures, first-byte stalls, 429, 502, 503, and 504 responses before any response body is exposed to the client.
+- Terminates a stream that stalls after partial output instead of hanging forever or replaying potentially unsafe tool-call content.
+- Cancels upstream generation promptly when the downstream client disconnects or interrupts a turn.
+- Does not inspect prompts, responses, or tool calls.
+- Logs timing, status, retry reason, and request IDs without logging bodies or credentials.
+
+## Requirements
+
+- Node.js 22.19 or newer
+
+If Node is installed with nvm on macOS, run commands through a login shell:
+
+```sh
+zsh -lc 'node --version'
+```
+
+## Start
+
+Do not put the API key in a committed file. Export it in the shell that starts the proxy:
+
+```sh
+cd llm-stream-watchdog
+export UPSTREAM_BASE_URL='https://your-provider.example/v1'
+export UPSTREAM_API_KEY='replace-with-your-key'
+npm start
+```
+
+The local base URL is:
+
+```text
+http://127.0.0.1:8787/v1
+```
+
+Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base URL. The proxy injects `UPSTREAM_API_KEY` into upstream requests when configured; otherwise it forwards the client's Authorization header.
+
+## Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `UPSTREAM_BASE_URL` | required | Target OpenAI-compatible API |
+| `UPSTREAM_API_KEY` | empty | Optional upstream bearer token |
+| `HOST` | `127.0.0.1` | Local bind host |
+| `PORT` | `8787` | Local bind port |
+| `FIRST_BYTE_TIMEOUT_MS` | `45000` | Maximum first-body-byte wait for JSON requests with `stream: true` |
+| `NON_STREAMING_FIRST_BYTE_TIMEOUT_MS` | `120000` | Maximum first-body-byte wait for non-streaming or unknown requests |
+| `IDLE_TIMEOUT_MS` | `180000` | Maximum gap between upstream body chunks |
+| `MAX_ATTEMPTS` | `2` | Total attempts before output starts |
+| `MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum buffered request body size (64 MiB) |
+| `EVENT_RETENTION_DAYS` | `30` | Anonymous dashboard history retention (hard-capped at 30 days) |
+| `EVENT_STORE_PATH` | `.data/events.jsonl` | Persistent anonymous event file |
+
+Long-running local commands are not affected. The timers exist only while this proxy has an active HTTP request to the upstream model API. Streaming requests use the shorter timeout so a silent upstream is retried quickly; non-streaming requests retain a conservative timeout because healthy long-reasoning calls may not emit body bytes until completion.
+
+## Local dashboard
+
+Open [http://127.0.0.1:8787/dashboard](http://127.0.0.1:8787/dashboard) to view request counts, retry recovery, timeout/stall history, latency percentiles, daily anomaly trends, and recent anomalies. The dashboard stores only whitelisted metadata; it never stores prompts, response bodies, API keys, or Authorization headers. History is retained for 30 days by default.
+
+## Run persistently with Docker Compose
+
+Copy the public example and set your upstream before starting:
+
+```sh
+cp .env.example .env
+# Edit UPSTREAM_BASE_URL in .env
+```
+
+The Compose service binds only to the local loopback interface, runs as a non-root user with a read-only filesystem, has a health check, rotates logs, and restarts automatically whenever Docker Desktop is running.
+
+```sh
+cd llm-stream-watchdog
+docker compose up -d --build
+docker compose ps
+curl http://127.0.0.1:8787/health
+```
+
+The API key does not need to be stored in Compose when clients already send their Authorization header, as DSH and OMP do. To stop the service intentionally:
+
+```sh
+docker compose down
+```
+
+To inspect structured logs:
+
+```sh
+docker compose logs --tail=100 -f watchdog
+```
+
+## Verify
+
+```sh
+npm run check
+npm test
+docker compose config --quiet
+docker build -t llm-stream-watchdog:local .
+curl http://127.0.0.1:8787/health
+```
+
+## Current safety boundary
+
+A request is retried only before any upstream body bytes reach the client. If a stream already emitted content and then stalls, the proxy closes that response explicitly. It does not replay partial text or partially emitted tool calls.
