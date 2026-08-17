@@ -50,6 +50,9 @@ test('serves the local dashboard and anonymous summary API', async (t) => {
   assert.match(html, /上游稳定性/);
   assert.match(html, /上游异常/);
   assert.match(html, /客户端主动取消不属于异常/);
+  assert.match(html, /服务地址/);
+  assert.match(html, /location\.origin\+'\/v1'/);
+  assert.match(html, /navigator\.clipboard\.writeText/);
   assert.doesNotMatch(html, /radial-gradient|box-shadow:0 12px 35px/);
   const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
   assert.ok(script);
