@@ -42,7 +42,18 @@ test('serves the local dashboard and anonymous summary API', async (t) => {
   const page = await fetch('http://127.0.0.1:' + port + '/dashboard');
   assert.equal(page.status, 200);
   assert.ok(page.headers.get('content-type').includes('text/html'));
-  assert.match(await page.text(), /LLM Stream Watchdog/);
+  const html = await page.text();
+  assert.match(html, /LLM Stream Watchdog/);
+  assert.match(html, /--bg:#121212/);
+  assert.match(html, /--green:#3ecf8e/);
+  assert.match(html, /class="overview"/);
+  assert.match(html, /上游稳定性/);
+  assert.match(html, /上游异常/);
+  assert.match(html, /客户端主动取消不属于异常/);
+  assert.doesNotMatch(html, /radial-gradient|box-shadow:0 12px 35px/);
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+  assert.doesNotThrow(() => new Function(script));
 
   const api = await fetch('http://127.0.0.1:' + port + '/api/dashboard?days=7');
   const payload = await api.json();
