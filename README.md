@@ -23,11 +23,13 @@ zsh -lc 'node --version'
 
 ## Start
 
-Configure the upstream URL in the shell that starts the proxy. API keys remain owned by the client and are sent with each request:
+Configure the upstream URL in the shell that starts the proxy. To enable automatic key rotation, export separate Claude and OpenAI key pools in the same shell; leave both empty to use credentials supplied by each client. Keys are never logged or committed:
 
 ```sh
 cd llm-stream-watchdog
 export UPSTREAM_BASE_URL='https://your-provider.example/v1'
+# Optional: export UPSTREAM_CLAUDE_API_KEYS='key_a,key_b'
+# Optional: export UPSTREAM_OPENAI_API_KEYS='key_c,key_d'
 npm start
 ```
 
@@ -37,13 +39,15 @@ The local base URL is:
 http://127.0.0.1:8787/v1
 ```
 
-Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base URL. The client must send its authentication headers with each request; the proxy forwards them unchanged and never owns or injects API keys.
+Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base URL. When key pools are configured, `claude-*` models use the Claude pool and other models use the OpenAI pool. Without a configured pool, the proxy remains compatible with client-supplied authentication headers.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `UPSTREAM_BASE_URL` | required | Target OpenAI-compatible API |
+| `UPSTREAM_CLAUDE_API_KEYS` | empty | Comma-separated Claude upstream keys; enables quota-aware rotation for `claude-*` |
+| `UPSTREAM_OPENAI_API_KEYS` | empty | Comma-separated non-Claude upstream keys; enables quota-aware rotation for other models |
 | `HOST` | `127.0.0.1` | Local bind host |
 | `PORT` | `8787` | Local bind port |
 | `FIRST_BYTE_TIMEOUT_MS` | `45000` | Maximum first-body-byte wait for JSON requests with `stream: true` |
@@ -78,7 +82,7 @@ docker compose ps
 curl http://127.0.0.1:8787/health
 ```
 
-API keys are not accepted through Compose; clients such as DSH and OMP send their selected credentials with each request. To stop the service intentionally:
+The Compose example leaves both key pools empty, so clients such as DSH and OMP send their selected credentials with each request. To enable proxy-managed rotation, fill the two key-pool variables in `.env` before starting; those keys stay inside the container and are never logged. To stop the service intentionally:
 
 ```sh
 docker compose down

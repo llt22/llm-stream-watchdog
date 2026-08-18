@@ -213,6 +213,35 @@ test('uses only client-supplied authentication and ignores retired key config', 
   assert.equal(loadConfig({ UPSTREAM_BASE_URL: 'https://provider.example/v1', UPSTREAM_API_KEY: retiredSecret }).upstreamApiKey, undefined);
 });
 
+test('rotates configured keys for the model group after checking usage', async (t) => {
+  const modelKeys = [];
+  const usageKeys = [];
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      usageKeys.push(request.headers.authorization);
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    modelKeys.push(request.headers.authorization);
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['openai-one', 'openai-two'],
+    claudeApiKeys: [],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+    assert.equal(await response.text(), 'ok');
+  }
+
+  assert.deepEqual(modelKeys, ['Bearer openai-one', 'Bearer openai-two']);
+  assert.deepEqual(usageKeys.sort(), ['Bearer openai-one', 'Bearer openai-two']);
+});
+
 
 test('times out and retries before upstream sends response headers', async (t) => {
   let attempts = 0;

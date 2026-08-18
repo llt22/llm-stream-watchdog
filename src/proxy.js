@@ -1,6 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createKeyPools, modelKeyGroup, parseKeyList } from './key-pool.js';
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -48,6 +49,8 @@ export function loadConfig(env = process.env) {
     maxRequestBodyBytes: positiveInteger(env.MAX_REQUEST_BODY_BYTES, 64 * 1024 * 1024, 'MAX_REQUEST_BODY_BYTES'),
     eventRetentionDays: Math.min(30, positiveInteger(env.EVENT_RETENTION_DAYS, 30, 'EVENT_RETENTION_DAYS')),
     eventStorePath: env.EVENT_STORE_PATH || path.resolve(env.DATA_DIR || '.data', 'events.jsonl'),
+    claudeApiKeys: parseKeyList(env.UPSTREAM_CLAUDE_API_KEYS),
+    openaiApiKeys: parseKeyList(env.UPSTREAM_OPENAI_API_KEYS),
   };
 }
 
@@ -230,6 +233,12 @@ function rejectOversizedRequest(request, response, error) {
 }
 
 export function createProxyServer(config, { logger = console.log, routeHandler } = {}) {
+  const keyPools = createKeyPools({
+    upstreamBaseUrl: config.upstreamBaseUrl,
+    claudeKeys: config.claudeApiKeys,
+    openaiKeys: config.openaiApiKeys,
+    logger,
+  });
   return http.createServer(async (request, response) => {
     const requestId = randomUUID();
     response.setHeader('x-watchdog-request-id', requestId);
@@ -267,6 +276,11 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
     const url = targetUrl(config.upstreamBaseUrl, request.url);
     const headers = copyRequestHeaders(request.headers);
     headers.set('x-client-request-id', String(requestId));
+    let parsedBody;
+    try { parsedBody = body ? JSON.parse(body.toString('utf8')) : undefined; } catch { parsedBody = undefined; }
+    const keyGroup = parsedBody?.model ? modelKeyGroup(parsedBody.model) : undefined;
+    const anyConfiguredKeyPool = keyPools.hasAnyConfiguredKeys();
+    const configuredKeyPool = anyConfiguredKeyPool || (keyGroup ? keyPools.hasConfiguredKeys(keyGroup) : false);
     const streamingRequest = isStreamingRequest(body, headers);
     const firstByteTimeoutMs = firstByteTimeoutForRequest(config, body, headers);
     let lastError;
@@ -275,12 +289,21 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
       if (downstreamController.signal.aborted) return;
       let result;
       let responseCommitted = false;
-      log(logger, 'info', 'upstream_attempt_started', { requestId, attempt, method: request.method, path: url.pathname });
+      const selectedKey = configuredKeyPool
+        ? (keyGroup ? await keyPools.select(keyGroup) : await keyPools.selectAny())
+        : undefined;
+      if (configuredKeyPool && !selectedKey) {
+        return sendJson(response, 429, { error: 'upstream_key_pool_exhausted', message: (keyGroup || 'configured') + ' key pool has no available quota' });
+      }
+      const attemptKeyGroup = keyGroup || selectedKey?.group || 'openai';
+      const attemptHeaders = new Headers(headers);
+      if (selectedKey) attemptHeaders.set('authorization', 'Bearer ' + selectedKey.value);
+      log(logger, 'info', 'upstream_attempt_started', { requestId, attempt, method: request.method, path: url.pathname, keyPool: selectedKey?.label });
       try {
         result = await fetchFirstChunk({
           url,
           method: request.method,
-          headers,
+          headers: attemptHeaders,
           body,
           timeoutMs: firstByteTimeoutMs,
           downstreamSignal: downstreamController.signal,
@@ -289,11 +312,13 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
         if (canRetryStatus(result.response.status) && attempt < config.maxAttempts) {
           result.attemptController.abort(new Error('retryable upstream status'));
           await result.reader?.cancel().catch(() => {});
-          log(logger, 'warn', 'upstream_retry', { requestId, attempt, reason: 'status_' + result.response.status });
+          log(logger, 'warn', 'upstream_retry', { requestId, attempt, reason: 'status_' + result.response.status, keyPool: selectedKey?.label });
+          if (selectedKey) keyPools.reportUpstreamStatus(attemptKeyGroup, selectedKey.value, result.response.status);
           await waitBeforeRetry(downstreamController.signal);
           continue;
         }
 
+        if (selectedKey) keyPools.reportUpstreamStatus(attemptKeyGroup, selectedKey.value, result.response.status);
         response.statusCode = result.response.status;
         response.statusMessage = result.response.statusText;
         copyResponseHeaders(result.response.headers, response);
@@ -356,6 +381,7 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
           requestId,
           attempt,
           reason,
+          keyPool: selectedKey?.label,
         });
         if (attempt < config.maxAttempts) {
           await waitBeforeRetry(downstreamController.signal);
