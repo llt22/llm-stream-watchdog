@@ -19,7 +19,7 @@ function logger(line) {
 
 const server = createProxyServer(config, {
   logger,
-  routeHandler: (request, response) => handleDashboardRequest(request, response, { store, config }),
+    routeHandler: (request, response, context) => handleDashboardRequest(request, response, { store, config, ...context }),
 });
 
 server.listen(config.port, config.host, () => {

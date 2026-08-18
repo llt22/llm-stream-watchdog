@@ -196,7 +196,8 @@ function createSseCompletionDetector(enabled) {
       const text = carry + decoder.decode(chunk, { stream: !final });
       if (/(?:^|\r?\n)data:\s*\[DONE\](?:\r?\n|$)/.test(text)
         || /(?:^|\r?\n)event:\s*response\.completed(?:\r?\n|$)/.test(text)
-        || /["']type["']\s*:\s*["']response\.completed["']/.test(text)) {
+        || /(?:^|\r?\n)event:\s*message_stop(?:\r?\n|$)/.test(text)
+        || /["']type["']\s*:\s*["'](?:response\.completed|message_stop)["']/.test(text)) {
         complete = true;
       }
       carry = text.slice(-256);
@@ -243,7 +244,7 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
     const requestId = randomUUID();
     response.setHeader('x-watchdog-request-id', requestId);
 
-    if (routeHandler?.(request, response)) return;
+    if (await routeHandler?.(request, response, { keyPools })) return;
 
     if (request.url === '/health') {
       return sendJson(response, 200, { ok: true });
@@ -350,7 +351,14 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
         attemptHeaders.delete('x-api-key');
         attemptHeaders.delete('api-key');
       }
-      log(logger, 'info', 'upstream_attempt_started', { requestId, attempt, method: request.method, path: url.pathname, keyPool: selectedKey?.label });
+      log(logger, 'info', 'upstream_attempt_started', {
+        requestId,
+        attempt,
+        method: request.method,
+        path: url.pathname,
+        model: typeof parsedBody?.model === 'string' ? parsedBody.model : undefined,
+        keyPool: selectedKey?.label,
+      });
       try {
         result = await fetchFirstChunk({
           url,

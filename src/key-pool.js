@@ -22,6 +22,25 @@ function hasNoQuota(body) {
     });
 }
 
+function quotaSnapshot(body) {
+  const source = body?.quota && typeof body.quota === 'object' ? body.quota : body;
+  const pick = (key) => Number.isFinite(Number(source?.[key])) ? Number(source[key]) : undefined;
+  const quota = { remaining: pick('remaining'), limit: pick('limit'), used: pick('used') };
+  if (Array.isArray(body?.rate_limits)) {
+    quota.rateLimits = body.rate_limits.map((item) => ({
+      window: typeof item?.window === 'string' ? item.window : undefined,
+      remaining: Number.isFinite(Number(item?.remaining)) ? Number(item.remaining) : undefined,
+      limit: Number.isFinite(Number(item?.limit)) ? Number(item.limit) : undefined,
+      used: Number.isFinite(Number(item?.used)) ? Number(item.used) : undefined,
+    }));
+  }
+  return Object.values(quota).some((value) => value !== undefined && (!Array.isArray(value) || value.length)) ? quota : undefined;
+}
+
+function maskedKey(key) {
+  return key.length > 10 ? key.slice(0, 4) + '...' + key.slice(-4) : '****';
+}
+
 export function createKeyPools({ upstreamBaseUrl, claudeKeys, openaiKeys, logger = () => {} }) {
   const usageUrl = new URL(upstreamBaseUrl.toString());
   usageUrl.pathname = usageUrl.pathname.replace(/\/$/, '') + '/usage';
@@ -34,8 +53,9 @@ export function createKeyPools({ upstreamBaseUrl, claudeKeys, openaiKeys, logger
   function createPool(name, configuredKeys) {
     return {
       name,
-      keys: (configuredKeys || []).map((key, index) => ({ key, label: name + '-key-' + (index + 1), exhausted: false, cooldownUntil: 0, usageCheckedAt: 0 })),
-      cursor: 0,
+      keys: (configuredKeys || []).map((key, index) => ({ key, label: name + '-key-' + (index + 1), masked: maskedKey(key), exhausted: false, cooldownUntil: 0, usageCheckedAt: 0, quota: undefined })),
+      preferredLabel: undefined,
+      activeLabel: undefined,
     };
   }
 
@@ -50,6 +70,7 @@ export function createKeyPools({ upstreamBaseUrl, claudeKeys, openaiKeys, logger
       if (response.ok) {
         const body = await response.json();
         item.exhausted = hasNoQuota(body);
+        item.quota = quotaSnapshot(body);
         logger(JSON.stringify({ event: 'key_usage_checked', pool: item.label, exhausted: item.exhausted }));
       }
     } catch (error) {
@@ -64,8 +85,20 @@ export function createKeyPools({ upstreamBaseUrl, claudeKeys, openaiKeys, logger
     const now = Date.now();
     const available = pool.keys.filter((item) => !item.exhausted && item.cooldownUntil <= now);
     if (!available.length) return undefined;
-    const item = available[pool.cursor % available.length];
-    pool.cursor += 1;
+    if (pool.preferredLabel) {
+      const preferred = available.find((item) => item.label === pool.preferredLabel);
+      if (!preferred) return undefined;
+      pool.activeLabel = preferred.label;
+      return { value: preferred.key, label: preferred.label, group: pool.name };
+    }
+    if (pool.activeLabel) {
+      const active = available.find((item) => item.label === pool.activeLabel);
+      if (active) {
+        return { value: active.key, label: active.label, group: pool.name };
+      }
+    }
+    const item = available[0];
+    pool.activeLabel = item.label;
     return { value: item.key, label: item.label, group: pool.name };
   }
 
@@ -85,6 +118,32 @@ export function createKeyPools({ upstreamBaseUrl, claudeKeys, openaiKeys, logger
     },
     hasAnyConfiguredKeys() { return [...pools.values()].some((pool) => pool.keys.length > 0); },
     reportUpstreamStatus,
+    async status() {
+      const result = {};
+      for (const [group, pool] of pools) {
+        for (const item of pool.keys) await refresh(item);
+        result[group] = {
+          preferredLabel: pool.preferredLabel || null,
+          activeLabel: pool.activeLabel || null,
+          keys: pool.keys.map((item) => ({
+            label: item.label,
+            masked: item.masked,
+            exhausted: item.exhausted,
+            cooldownUntil: item.cooldownUntil || null,
+            quota: item.quota || null,
+          })),
+        };
+      }
+      return result;
+    },
+    setPreferred(group, label) {
+      const pool = pools.get(group);
+      if (!pool) throw new Error('unknown key pool');
+      if (label !== null && label !== undefined && !pool.keys.some((item) => item.label === label)) {
+        throw new Error('unknown key label');
+      }
+      pool.preferredLabel = label || undefined;
+    },
     usageUrl: usageUrl.toString(),
   };
 }

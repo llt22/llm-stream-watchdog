@@ -123,6 +123,29 @@ test('retries when the first attempt produces no response body bytes', async (t)
   assert.ok(logs.some((entry) => entry.event === 'upstream_retry'));
 });
 
+test('recognizes Anthropic message_stop as a completed SSE stream', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    response.setHeader('content-type', 'text/event-stream');
+    response.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+  });
+  const upstreamPort = await listen(upstream);
+  const logs = [];
+  const proxy = createProxyServer(config(upstreamPort), { logger: (line) => logs.push(JSON.parse(line)) });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-opus-4-8', stream: true, messages: [] }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /message_stop/);
+  assert.ok(logs.some((entry) => entry.event === 'request_complete'));
+  assert.ok(!logs.some((entry) => entry.event === 'stream_error_after_commit'));
+});
+
 test('terminates a partial stream that becomes idle without replaying it', async (t) => {
   let attempts = 0;
   const upstream = http.createServer((request, response) => {
@@ -213,7 +236,7 @@ test('uses only client-supplied authentication and ignores retired key config', 
   assert.equal(loadConfig({ UPSTREAM_BASE_URL: 'https://provider.example/v1', UPSTREAM_API_KEY: retiredSecret }).upstreamApiKey, undefined);
 });
 
-test('rotates configured keys for the model group after checking usage', async (t) => {
+test('reuses the same configured key across successful requests until 429', async (t) => {
   const modelKeys = [];
   const usageKeys = [];
   const upstream = http.createServer((request, response) => {
@@ -238,7 +261,7 @@ test('rotates configured keys for the model group after checking usage', async (
     assert.equal(await response.text(), 'ok');
   }
 
-  assert.deepEqual(modelKeys, ['Bearer openai-one', 'Bearer openai-two']);
+  assert.deepEqual(modelKeys, ['Bearer openai-one', 'Bearer openai-one']);
   assert.deepEqual(usageKeys.sort(), ['Bearer openai-one', 'Bearer openai-two']);
 });
 

@@ -47,6 +47,15 @@ test('persists only whitelisted anonymous event fields and restores history', (t
   assert.equal(summary.recentAnomalies[0].event, 'upstream_retry');
 });
 
+test('preserves the Anthropic messages path in dashboard events', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watchdog-store-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = createEventStore({ filePath: path.join(directory, 'events.jsonl'), retentionDays: 30 });
+  store.record(event('upstream_attempt_started', { attempt: 1, method: 'POST', path: '/v1/messages' }));
+  store.record(event('upstream_retry', { attempt: 1, reason: 'status_502', path: '/v1/messages' }));
+  assert.equal(store.summary(30).recentAnomalies[0].path, '/v1/messages');
+});
+
 test('counts client cancellation without classifying it as an anomaly', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'watchdog-store-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

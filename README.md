@@ -23,7 +23,7 @@ zsh -lc 'node --version'
 
 ## Start
 
-Configure the upstream URL in the shell that starts the proxy. To enable automatic key rotation, export separate Claude and OpenAI key pools in the same shell; leave both empty to use credentials supplied by each client. Keys are never logged or committed:
+Configure the upstream URL in the shell that starts the proxy. To enable pool-managed key selection, export separate Claude and OpenAI key pools in the same shell; leave both empty to use credentials supplied by each client. Keys are never logged or committed:
 
 ```sh
 cd llm-stream-watchdog
@@ -46,8 +46,8 @@ Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `UPSTREAM_BASE_URL` | required | Target OpenAI-compatible API |
-| `UPSTREAM_CLAUDE_API_KEYS` | empty | Comma-separated Claude upstream keys; enables quota-aware rotation for `claude-*` |
-| `UPSTREAM_OPENAI_API_KEYS` | empty | Comma-separated non-Claude upstream keys; enables quota-aware rotation for other models |
+| `UPSTREAM_CLAUDE_API_KEYS` | empty | Comma-separated Claude upstream keys; uses the same key until 429 forces a switch |
+| `UPSTREAM_OPENAI_API_KEYS` | empty | Comma-separated non-Claude upstream keys; uses the same key until 429 forces a switch |
 | `HOST` | `127.0.0.1` | Local bind host |
 | `PORT` | `8787` | Local bind port |
 | `FIRST_BYTE_TIMEOUT_MS` | `45000` | Maximum first-body-byte wait for JSON requests with `stream: true` |
@@ -82,7 +82,7 @@ docker compose ps
 curl http://127.0.0.1:8787/health
 ```
 
-The Compose example leaves both key pools empty, so clients such as DSH and OMP send their selected credentials with each request. To enable proxy-managed rotation, fill the two key-pool variables in `.env` before starting; those keys stay inside the container and are never logged. To stop the service intentionally:
+The Compose example leaves both key pools empty, so clients such as DSH and OMP send their selected credentials with each request. To enable proxy-managed key selection, fill the two key-pool variables in `.env` before starting; those keys stay inside the container and are never logged. The proxy keeps using the current key until a 429 moves it to the next available key. To stop the service intentionally:
 
 ```sh
 docker compose down

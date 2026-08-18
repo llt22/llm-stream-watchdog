@@ -24,7 +24,7 @@ const ANOMALY_EVENTS = new Set([
 ]);
 
 function sanitizePath(value) {
-  return ['/v1/responses', '/v1/chat/completions', '/v1/models'].includes(value) ? value : '(other)';
+  return ['/v1/responses', '/v1/chat/completions', '/v1/messages', '/v1/models'].includes(value) ? value : '(other)';
 }
 
 function sanitizeReason(value) {
