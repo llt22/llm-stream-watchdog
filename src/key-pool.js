@@ -15,11 +15,7 @@ function hasNoQuota(body) {
     const remaining = Number(quota.remaining);
     if (Number.isFinite(remaining) && remaining <= 0) return true;
   }
-  return Array.isArray(body?.rate_limits)
-    && body.rate_limits.some((item) => {
-      const remaining = Number(item?.remaining);
-      return Number.isFinite(remaining) && remaining <= 0;
-    });
+  return false;
 }
 
 function quotaSnapshot(body) {

@@ -265,6 +265,33 @@ test('reuses the same configured key across successful requests until 429', asyn
   assert.deepEqual(usageKeys.sort(), ['Bearer openai-one', 'Bearer openai-two']);
 });
 
+test('does not treat rate limit window exhaustion as full key exhaustion', async (t) => {
+  const modelKeys = [];
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({
+        quota: { remaining: 10, limit: 20, used: 10 },
+        rate_limits: [{ window: '5h', remaining: 0, limit: 160, used: 160 }],
+      }));
+    }
+    modelKeys.push(request.headers.authorization);
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['openai-one'],
+    claudeApiKeys: [],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'ok');
+  assert.deepEqual(modelKeys, ['Bearer openai-one']);
+});
+
 test('reuses the same key when retrying a 503 upstream', async (t) => {
   const authSeq = [];
   let modelHits = 0;
