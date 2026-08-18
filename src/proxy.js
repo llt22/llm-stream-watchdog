@@ -149,8 +149,22 @@ function waitForDrain(response) {
   });
 }
 
+const RETRY_DELAY_MS = 5000;
+
 function canRetryStatus(status) {
   return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function waitBeforeRetry(downstreamSignal) {
+  if (downstreamSignal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    if (downstreamSignal.aborted) return resolve();
+    const timer = setTimeout(resolve, RETRY_DELAY_MS);
+    downstreamSignal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }
 
 function isStreamingRequest(body, headers) {
@@ -276,6 +290,7 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
           result.attemptController.abort(new Error('retryable upstream status'));
           await result.reader?.cancel().catch(() => {});
           log(logger, 'warn', 'upstream_retry', { requestId, attempt, reason: 'status_' + result.response.status });
+          await waitBeforeRetry(downstreamController.signal);
           continue;
         }
 
@@ -342,7 +357,10 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
           attempt,
           reason,
         });
-        if (attempt < config.maxAttempts) continue;
+        if (attempt < config.maxAttempts) {
+          await waitBeforeRetry(downstreamController.signal);
+          continue;
+        }
       }
     }
 

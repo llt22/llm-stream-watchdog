@@ -49,7 +49,7 @@ Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base 
 | `FIRST_BYTE_TIMEOUT_MS` | `45000` | Maximum first-body-byte wait for JSON requests with `stream: true` |
 | `NON_STREAMING_FIRST_BYTE_TIMEOUT_MS` | `120000` | Maximum first-body-byte wait for non-streaming or unknown requests |
 | `IDLE_TIMEOUT_MS` | `180000` | Maximum gap between upstream body chunks |
-| `MAX_ATTEMPTS` | `2` | Total attempts before output starts |
+| `MAX_ATTEMPTS` | `4` | Total attempts before output starts (retries wait 5s between attempts) |
 | `MAX_REQUEST_BODY_BYTES` | `67108864` | Maximum buffered request body size (64 MiB) |
 | `EVENT_RETENTION_DAYS` | `30` | Anonymous dashboard history retention (hard-capped at 30 days) |
 | `EVENT_STORE_PATH` | `.data/events.jsonl` | Persistent anonymous event file |
