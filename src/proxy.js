@@ -297,7 +297,11 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
       }
       const attemptKeyGroup = keyGroup || selectedKey?.group || 'openai';
       const attemptHeaders = new Headers(headers);
-      if (selectedKey) attemptHeaders.set('authorization', 'Bearer ' + selectedKey.value);
+      if (selectedKey) {
+        attemptHeaders.set('authorization', 'Bearer ' + selectedKey.value);
+        attemptHeaders.delete('x-api-key');
+        attemptHeaders.delete('api-key');
+      }
       log(logger, 'info', 'upstream_attempt_started', { requestId, attempt, method: request.method, path: url.pathname, keyPool: selectedKey?.label });
       try {
         result = await fetchFirstChunk({

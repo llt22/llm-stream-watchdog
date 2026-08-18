@@ -242,6 +242,35 @@ test('rotates configured keys for the model group after checking usage', async (
   assert.deepEqual(usageKeys.sort(), ['Bearer openai-one', 'Bearer openai-two']);
 });
 
+test('replaces client credentials with the pool key and strips other auth headers', async (t) => {
+  const received = [];
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    received.push({
+      authorization: request.headers.authorization,
+      xApiKey: request.headers['x-api-key'],
+      apiKey: request.headers['api-key'],
+    });
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['pool-key'],
+    claudeApiKeys: [],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models', {
+    headers: { authorization: 'Bearer client-key', 'x-api-key': 'client-x', 'api-key': 'client-api' },
+  });
+  assert.equal(await response.text(), 'ok');
+  assert.deepEqual(received, [{ authorization: 'Bearer pool-key', xApiKey: undefined, apiKey: undefined }]);
+});
+
 
 test('times out and retries before upstream sends response headers', async (t) => {
   let attempts = 0;
