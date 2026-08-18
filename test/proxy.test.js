@@ -294,6 +294,86 @@ test('rotates to the next key when retrying a 429 upstream', async (t) => {
   assert.deepEqual(authSeq, ['Bearer openai-one', 'Bearer openai-two']);
 });
 
+test('merges model lists from both pools with distinct keys', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    const auth = request.headers.authorization;
+    response.setHeader('content-type', 'application/json');
+    if (auth === 'Bearer claude-key') {
+      return response.end(JSON.stringify({ data: [{ id: 'claude-sonnet-5' }, { id: 'shared-model' }] }));
+    }
+    return response.end(JSON.stringify({ data: [{ id: 'gpt-5.4' }, { id: 'shared-model' }] }));
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['openai-key'],
+    claudeApiKeys: ['claude-key'],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  const body = await response.json();
+  const ids = body.data.map((model) => model.id).sort();
+  assert.deepEqual(ids, ['claude-sonnet-5', 'gpt-5.4', 'shared-model']);
+});
+
+test('returns available models when one pool fails to list', async (t) => {
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    if (request.headers.authorization === 'Bearer claude-key') {
+      response.statusCode = 503;
+      return response.end('unavailable');
+    }
+    response.setHeader('content-type', 'application/json');
+    return response.end(JSON.stringify({ data: [{ id: 'gpt-5.4' }] }));
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['openai-key'],
+    claudeApiKeys: ['claude-key'],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.data.map((model) => model.id), ['gpt-5.4']);
+});
+
+test('does not aggregate models when only one pool is configured', async (t) => {
+  let modelCalls = 0;
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    modelCalls += 1;
+    response.setHeader('content-type', 'application/json');
+    return response.end(JSON.stringify({ data: [{ id: 'gpt-5.4' }] }));
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['openai-key'],
+    claudeApiKeys: [],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.data.map((model) => model.id), ['gpt-5.4']);
+  assert.equal(modelCalls, 1);
+});
+
 test('replaces client credentials with the pool key and strips other auth headers', async (t) => {
   const received = [];
   const upstream = http.createServer((request, response) => {

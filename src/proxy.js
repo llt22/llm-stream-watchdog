@@ -283,6 +283,51 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
     const configuredKeyPool = anyConfiguredKeyPool || (keyGroup ? keyPools.hasConfiguredKeys(keyGroup) : false);
     const streamingRequest = isStreamingRequest(body, headers);
     const firstByteTimeoutMs = firstByteTimeoutForRequest(config, body, headers);
+
+    if (request.method === 'GET' && url.pathname.endsWith('/models')
+      && keyPools.hasConfiguredKeys('openai') && keyPools.hasConfiguredKeys('claude')) {
+      const outcomes = await Promise.all(['openai', 'claude'].map(async (group) => {
+        const key = await keyPools.select(group);
+        if (!key) {
+          log(logger, 'warn', 'models_pool_skipped', { requestId, group, reason: 'no_available_key' });
+          return null;
+        }
+        const modelHeaders = new Headers(headers);
+        modelHeaders.set('authorization', 'Bearer ' + key.value);
+        modelHeaders.delete('x-api-key');
+        modelHeaders.delete('api-key');
+        try {
+          const resp = await fetch(url, { method: 'GET', headers: modelHeaders, signal: AbortSignal.timeout(config.nonStreamingFirstByteTimeoutMs) });
+          if (!resp.ok) {
+            log(logger, 'warn', 'models_pool_failed', { requestId, group, reason: 'status_' + resp.status });
+            return null;
+          }
+          const payload = await resp.json();
+          return Array.isArray(payload?.data) ? payload.data : [];
+        } catch (error) {
+          log(logger, 'warn', 'models_pool_failed', { requestId, group, reason: error.message });
+          return null;
+        }
+      }));
+      if (outcomes.every((list) => list === null)) {
+        return sendJson(response, 502, { error: 'upstream_models_unavailable', message: 'all configured key pools failed to list models' });
+      }
+      const merged = [];
+      const seen = new Set();
+      for (const list of outcomes) {
+        if (!list) continue;
+        for (const model of list) {
+          const id = model?.id;
+          if (id !== undefined) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+          }
+          merged.push(model);
+        }
+      }
+      return sendJson(response, 200, { object: 'list', data: merged });
+    }
+
     let lastError;
     let selectedKey;
     let rotateKey = true;
