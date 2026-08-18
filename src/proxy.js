@@ -284,16 +284,19 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
     const streamingRequest = isStreamingRequest(body, headers);
     const firstByteTimeoutMs = firstByteTimeoutForRequest(config, body, headers);
     let lastError;
+    let selectedKey;
+    let rotateKey = true;
 
     for (let attempt = 1; attempt <= config.maxAttempts; attempt += 1) {
       if (downstreamController.signal.aborted) return;
       let result;
       let responseCommitted = false;
-      const selectedKey = configuredKeyPool
-        ? (keyGroup ? await keyPools.select(keyGroup) : await keyPools.selectAny())
-        : undefined;
-      if (configuredKeyPool && !selectedKey) {
-        return sendJson(response, 429, { error: 'upstream_key_pool_exhausted', message: (keyGroup || 'configured') + ' key pool has no available quota' });
+      if (configuredKeyPool && rotateKey) {
+        selectedKey = keyGroup ? await keyPools.select(keyGroup) : await keyPools.selectAny();
+        if (!selectedKey) {
+          return sendJson(response, 429, { error: 'upstream_key_pool_exhausted', message: (keyGroup || 'configured') + ' key pool has no available quota' });
+        }
+        rotateKey = false;
       }
       const attemptKeyGroup = keyGroup || selectedKey?.group || 'openai';
       const attemptHeaders = new Headers(headers);
@@ -318,6 +321,7 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
           await result.reader?.cancel().catch(() => {});
           log(logger, 'warn', 'upstream_retry', { requestId, attempt, reason: 'status_' + result.response.status, keyPool: selectedKey?.label });
           if (selectedKey) keyPools.reportUpstreamStatus(attemptKeyGroup, selectedKey.value, result.response.status);
+          if (result.response.status === 429) rotateKey = true;
           await waitBeforeRetry(downstreamController.signal);
           continue;
         }

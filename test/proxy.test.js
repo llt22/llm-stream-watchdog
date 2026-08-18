@@ -242,6 +242,58 @@ test('rotates configured keys for the model group after checking usage', async (
   assert.deepEqual(usageKeys.sort(), ['Bearer openai-one', 'Bearer openai-two']);
 });
 
+test('reuses the same key when retrying a 503 upstream', async (t) => {
+  const authSeq = [];
+  let modelHits = 0;
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    authSeq.push(request.headers.authorization);
+    modelHits += 1;
+    if (modelHits < 2) { response.statusCode = 503; return response.end('unavailable'); }
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['openai-one', 'openai-two'],
+    claudeApiKeys: [],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(await response.text(), 'ok');
+  assert.deepEqual(authSeq, ['Bearer openai-one', 'Bearer openai-one']);
+});
+
+test('rotates to the next key when retrying a 429 upstream', async (t) => {
+  const authSeq = [];
+  let modelHits = 0;
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    authSeq.push(request.headers.authorization);
+    modelHits += 1;
+    if (modelHits < 2) { response.statusCode = 429; return response.end('rate limited'); }
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, {
+    openaiApiKeys: ['openai-one', 'openai-two'],
+    claudeApiKeys: [],
+  }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const response = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(await response.text(), 'ok');
+  assert.deepEqual(authSeq, ['Bearer openai-one', 'Bearer openai-two']);
+});
+
 test('replaces client credentials with the pool key and strips other auth headers', async (t) => {
   const received = [];
   const upstream = http.createServer((request, response) => {
