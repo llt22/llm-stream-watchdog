@@ -36,6 +36,7 @@ test('requires an explicit upstream and uses protocol-aware timeout defaults', (
   assert.equal(loaded.firstByteTimeoutMs, 45000);
   assert.equal(loaded.nonStreamingFirstByteTimeoutMs, 120000);
   assert.equal(loaded.maxRequestBodyBytes, 64 * 1024 * 1024);
+  assert.equal(loaded.maxAttempts, 6);
   assert.equal(loaded.eventRetentionDays, 30);
   assert.equal(loadConfig({ UPSTREAM_BASE_URL: 'https://provider.example/v1', EVENT_RETENTION_DAYS: '365' }).eventRetentionDays, 30);
 });

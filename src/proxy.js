@@ -45,7 +45,7 @@ export function loadConfig(env = process.env) {
     firstByteTimeoutMs: positiveInteger(env.FIRST_BYTE_TIMEOUT_MS, 45000, 'FIRST_BYTE_TIMEOUT_MS'),
     nonStreamingFirstByteTimeoutMs: positiveInteger(env.NON_STREAMING_FIRST_BYTE_TIMEOUT_MS, 120000, 'NON_STREAMING_FIRST_BYTE_TIMEOUT_MS'),
     idleTimeoutMs: positiveInteger(env.IDLE_TIMEOUT_MS, 180000, 'IDLE_TIMEOUT_MS'),
-    maxAttempts: positiveInteger(env.MAX_ATTEMPTS, 2, 'MAX_ATTEMPTS'),
+    maxAttempts: positiveInteger(env.MAX_ATTEMPTS, 6, 'MAX_ATTEMPTS'),
     maxRequestBodyBytes: positiveInteger(env.MAX_REQUEST_BODY_BYTES, 64 * 1024 * 1024, 'MAX_REQUEST_BODY_BYTES'),
     eventRetentionDays: Math.min(30, positiveInteger(env.EVENT_RETENTION_DAYS, 30, 'EVENT_RETENTION_DAYS')),
     eventStorePath: env.EVENT_STORE_PATH || path.resolve(env.DATA_DIR || '.data', 'events.jsonl'),
@@ -153,7 +153,7 @@ function waitForDrain(response) {
   });
 }
 
-const RETRY_DELAY_MS = 5000;
+const RETRY_DELAY_MS = 10000;
 
 function canRetryStatus(status) {
   return status === 429 || status === 502 || status === 503 || status === 504;
