@@ -30,6 +30,7 @@ cd llm-stream-watchdog
 export UPSTREAM_BASE_URL='https://your-provider.example/v1'
 # Optional: export UPSTREAM_CLAUDE_API_KEYS='key_a,key_b'
 # Optional: export UPSTREAM_OPENAI_API_KEYS='key_c,key_d'
+# Optional: export PROXY_ACCESS_TOKEN='client_token'   # require clients to send this token
 npm start
 ```
 
@@ -48,6 +49,7 @@ Configure Codex, OMP, DSH, or another OpenAI-compatible client to use that base 
 | `UPSTREAM_BASE_URL` | required | Target OpenAI-compatible API |
 | `UPSTREAM_CLAUDE_API_KEYS` | empty | Comma-separated Claude upstream keys; uses the same key until 429 forces a switch |
 | `UPSTREAM_OPENAI_API_KEYS` | empty | Comma-separated non-Claude upstream keys; uses the same key until 429 forces a switch |
+| `PROXY_ACCESS_TOKEN` | empty | Comma-separated tokens clients must send (Authorization: Bearer or x-api-key); empty disables downstream auth |
 | `HOST` | `127.0.0.1` | Local bind host |
 | `PORT` | `8787` | Local bind port |
 | `FIRST_BYTE_TIMEOUT_MS` | `45000` | Maximum first-body-byte wait for JSON requests with `stream: true` |

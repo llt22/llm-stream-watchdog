@@ -647,3 +647,40 @@ test('allows healthy non-streaming responses beyond the streaming timeout', asyn
   assert.deepEqual(await response.json(), { status: 'completed' });
   assert.equal(attempts, 1);
 });
+
+test('rejects requests without a valid access token but exempts health', async (t) => {
+  const upstream = http.createServer((request, response) => response.end('ok'));
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, { accessTokens: ['secret-token'] }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const noToken = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models');
+  assert.equal(noToken.status, 401);
+  const wrongToken = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models', { headers: { authorization: 'Bearer nope' } });
+  assert.equal(wrongToken.status, 401);
+  const health = await fetch('http://127.0.0.1:' + proxyPort + '/health');
+  assert.equal(health.status, 200);
+});
+
+test('accepts a valid access token via bearer or x-api-key and injects the pool key', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((request, response) => {
+    if (request.url.startsWith('/v1/usage')) {
+      response.setHeader('content-type', 'application/json');
+      return response.end(JSON.stringify({ quota: { remaining: 10 } }));
+    }
+    seen.push(request.headers.authorization);
+    response.end('ok');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createProxyServer(config(upstreamPort, { accessTokens: ['secret-token'], openaiApiKeys: ['pool-key'], claudeApiKeys: [] }), { logger: () => {} });
+  const proxyPort = await listen(proxy);
+  t.after(async () => { await close(proxy); await close(upstream); });
+
+  const viaBearer = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models', { headers: { authorization: 'Bearer secret-token' } });
+  assert.equal(await viaBearer.text(), 'ok');
+  const viaApiKey = await fetch('http://127.0.0.1:' + proxyPort + '/v1/models', { headers: { 'x-api-key': 'secret-token' } });
+  assert.equal(await viaApiKey.text(), 'ok');
+  assert.ok(seen.length > 0 && seen.every((auth) => auth === 'Bearer pool-key'));
+});

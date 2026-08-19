@@ -1,6 +1,6 @@
 import http from 'node:http';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createKeyPools, modelKeyGroup, parseKeyList } from './key-pool.js';
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -51,6 +51,7 @@ export function loadConfig(env = process.env) {
     eventStorePath: env.EVENT_STORE_PATH || path.resolve(env.DATA_DIR || '.data', 'events.jsonl'),
     claudeApiKeys: parseKeyList(env.UPSTREAM_CLAUDE_API_KEYS),
     openaiApiKeys: parseKeyList(env.UPSTREAM_OPENAI_API_KEYS),
+    accessTokens: parseKeyList(env.PROXY_ACCESS_TOKEN),
   };
 }
 
@@ -222,6 +223,26 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload));
 }
 
+function extractClientToken(headers) {
+  const auth = headers['authorization'];
+  if (typeof auth === 'string') {
+    const match = /^Bearer\s+(.+)$/i.exec(auth.trim());
+    if (match) return match[1].trim();
+  }
+  const apiKey = headers['x-api-key'];
+  if (typeof apiKey === 'string' && apiKey.trim()) return apiKey.trim();
+  return undefined;
+}
+
+function isAuthorized(token, accessTokens) {
+  if (!token) return false;
+  const provided = Buffer.from(token);
+  return accessTokens.some((candidate) => {
+    const expected = Buffer.from(candidate);
+    return expected.length === provided.length && timingSafeEqual(expected, provided);
+  });
+}
+
 function rejectOversizedRequest(request, response, error) {
   if (response.destroyed || response.headersSent) return;
   response.statusCode = 413;
@@ -248,6 +269,11 @@ export function createProxyServer(config, { logger = console.log, routeHandler }
 
     if (request.url === '/health') {
       return sendJson(response, 200, { ok: true });
+    }
+
+    if (config.accessTokens?.length && !isAuthorized(extractClientToken(request.headers), config.accessTokens)) {
+      log(logger, 'warn', 'unauthorized_request', { requestId, method: request.method, path: request.url });
+      return sendJson(response, 401, { error: 'unauthorized', message: 'missing or invalid proxy access token' });
     }
 
     const downstreamController = new AbortController();
